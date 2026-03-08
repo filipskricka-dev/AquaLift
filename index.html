@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>AquaLift</title>
+  <meta name="description" content="Swimming & Gym Tracker" />
+  <meta name="theme-color" content="#0d1117" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AquaLift" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; }
+    #root { min-height: 100vh; }
+    select option { background: #0d1117; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.5.0/umd/Recharts.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+const { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = Recharts;
+
+const STROKES = ["Freestyle", "Backstroke", "Breaststroke", "Butterfly", "Mixed"];
+const SWIM_INTENSITIES = ["Easy", "Moderate", "Maximum Effort"];
+const GYM_INTENSITIES = ["Warmup", "High Effort", "Failure", "Power"];
+const TABS = ["Dashboard", "Log Workout", "History", "PRs"];
+const SWIM_COLORS = { Easy: "#34d399", Moderate: "#38bdf8", "Maximum Effort": "#f43f5e" };
+const GYM_COLORS = { Warmup: "#94a3b8", "High Effort": "#fb923c", Failure: "#f43f5e", Power: "#a78bfa" };
+const INITIAL_EXERCISES = ["Bench Press", "Incline Dumbbell Press", "Squat", "Romanian Deadlift", "Deadlift", "Pull Ups"];
+
+const fmt = d => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+const epley = (w, r) => r === 1 ? w : Math.round(w * (1 + r / 30));
+const emptySegment = () => ({ id: Date.now() + Math.random(), distance: "", stroke: "Freestyle", intensity: "Moderate", strokesPer25: "" });
+const emptySwimSet = () => ({ id: Date.now() + Math.random(), reps: 1, segments: [emptySegment()] });
+const emptyGymSet = () => ({ id: Date.now() + Math.random(), weight: "", reps: "", intensity: "High Effort" });
+const emptyExercise = () => ({ id: Date.now() + Math.random(), name: "", sets: [emptyGymSet()] });
+const swimSetDist = s => s.reps * s.segments.reduce((a, seg) => a + (+seg.distance || 0), 0);
+const gymVol = w => w.exercises.reduce((a, ex) => a + ex.sets.filter(s => s.intensity !== "Warmup").reduce((b, s) => b + (+s.weight||0)*(+s.reps||0), 0), 0);
+
+const buildAllTimeBests = (gyms) => {
+  const map = {};
+  gyms.forEach(w => w.exercises.forEach(ex => {
+    if (!ex.name) return;
+    if (!map[ex.name]) map[ex.name] = { estRM: 0, bestVol: 0, bestVolSet: null, bestEstSet: null, lastSessionDate: "", lastSessionBestSet: null };
+    ex.sets.forEach(s => {
+      const vol = (+s.weight||0) * (+s.reps||0), est = epley(+s.weight||0, +s.reps||0);
+      if (vol > map[ex.name].bestVol) { map[ex.name].bestVol = vol; map[ex.name].bestVolSet = { ...s }; }
+      if (est > map[ex.name].estRM) { map[ex.name].estRM = est; map[ex.name].bestEstSet = { ...s }; }
+    });
+    if (w.date >= map[ex.name].lastSessionDate) {
+      const bestInSession = ex.sets.reduce((best, s) => ((+s.weight||0)*(+s.reps||0)) > ((+best.weight||0)*(+best.reps||0)) ? s : best, ex.sets[0]);
+      if (w.date > map[ex.name].lastSessionDate) { map[ex.name].lastSessionDate = w.date; map[ex.name].lastSessionBestSet = { ...bestInSession }; }
+      else if (w.date === map[ex.name].lastSessionDate) {
+        const prevVol = map[ex.name].lastSessionBestSet ? (+map[ex.name].lastSessionBestSet.weight||0)*(+map[ex.name].lastSessionBestSet.reps||0) : 0;
+        if ((+bestInSession.weight||0)*(+bestInSession.reps||0) > prevVol) map[ex.name].lastSessionBestSet = { ...bestInSession };
+      }
+    }
+  }));
+  return map;
+};
+
+const LS = {
+  get: (k) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+const Card = ({ children }) => <div style={{ background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 16, padding: 16 }}>{children}</div>;
+const Badge = ({ type }) => <span style={{ background: type==="swim"?"#0e4f6e":"#2d1b4e", color: type==="swim"?"#38bdf8":"#a78bfa", borderRadius:999, padding:"2px 10px", fontSize:12, fontWeight:600 }}>{type==="swim"?"🏊 Swim":"🏋️ Gym"}</span>;
+const StatCard = ({ label, value, sub, color }) => (
+  <Card>
+    <div style={{ color:"#8892a4", fontSize:13, marginBottom:4 }}>{label}</div>
+    <div style={{ color, fontSize:28, fontWeight:700, lineHeight:1 }}>{value}</div>
+    {sub && <div style={{ color:"#8892a4", fontSize:12, marginTop:4 }}>{sub}</div>}
+  </Card>
+);
+
+const inp = { background:"#0b0f1a", border:"1px solid #2a3045", borderRadius:8, color:"#e2e8f0", padding:"7px 10px", width:"100%", fontSize:13, outline:"none", boxSizing:"border-box" };
+const lbl = { color:"#8892a4", fontSize:11, marginBottom:3, display:"block", textTransform:"uppercase", letterSpacing:0.5 };
+
+function SegmentRow({ seg, idx, onChange, onRemove, canRemove }) {
+  return (
+    <div style={{ background:"#13182a", border:"1px solid #1e2a40", borderRadius:8, padding:10, marginBottom:6 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+        <span style={{ color:"#64748b", fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:0.5 }}>Segment {idx+1}</span>
+        {canRemove && <button onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:"#ef4444", fontSize:14, padding:0 }}>✕</button>}
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+        <div><label style={lbl}>Distance (m)</label><input type="number" step={25} placeholder="50" value={seg.distance} onChange={e=>onChange("distance",e.target.value)} style={inp}/></div>
+        <div><label style={lbl}>Stroke</label><select value={seg.stroke} onChange={e=>onChange("stroke",e.target.value)} style={inp}>{STROKES.map(s=><option key={s}>{s}</option>)}</select></div>
+        <div><label style={lbl}>Intensity</label><select value={seg.intensity} onChange={e=>onChange("intensity",e.target.value)} style={{...inp,color:SWIM_COLORS[seg.intensity]}}>{SWIM_INTENSITIES.map(i=><option key={i} style={{color:SWIM_COLORS[i]}}>{i}</option>)}</select></div>
+        <div><label style={lbl}>Strokes/25m</label><input type="number" placeholder="Optional" value={seg.strokesPer25} onChange={e=>onChange("strokesPer25",e.target.value)} style={inp}/></div>
+      </div>
+    </div>
+  );
+}
+
+function SwimSetBlock({ s, idx, onUpdate, onRemove, canRemove }) {
+  const updateSeg = (si,f,v) => { const segs=[...s.segments]; segs[si]={...segs[si],[f]:v}; onUpdate({...s,segments:segs}); };
+  return (
+    <div style={{ background:"#0f1320", border:"1px solid #2a3045", borderRadius:12, padding:12, marginBottom:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+        <span style={{ color:"#38bdf8", fontSize:13, fontWeight:700 }}>SET {idx+1}</span>
+        {canRemove && <button onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:"#ef4444", fontSize:15, padding:0 }}>✕</button>}
+      </div>
+      <div style={{ marginBottom:10 }}><label style={lbl}>Repetitions</label><input type="number" min={1} value={s.reps} onChange={e=>onUpdate({...s,reps:+e.target.value||1})} style={{...inp,width:80}}/></div>
+      <div style={{ color:"#64748b", fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, marginBottom:6 }}>Segments</div>
+      {s.segments.map((seg,si)=><SegmentRow key={seg.id} seg={seg} idx={si} onChange={(f,v)=>updateSeg(si,f,v)} onRemove={()=>onUpdate({...s,segments:s.segments.filter((_,i)=>i!==si)})} canRemove={s.segments.length>1}/>)}
+      <button onClick={()=>onUpdate({...s,segments:[...s.segments,emptySegment()]})} style={{ width:"100%", padding:7, borderRadius:7, border:"1px dashed #2a3a55", background:"transparent", color:"#64748b", cursor:"pointer", fontSize:12, marginTop:2 }}>+ Add Segment</button>
+    </div>
+  );
+}
+
+function GymSetRow({ s, idx, onChange, onRemove, canRemove }) {
+  const est = s.weight && s.reps ? epley(+s.weight,+s.reps) : null;
+  return (
+    <div style={{ borderRadius:8, padding:"4px 0" }}>
+      <div style={{ display:"grid", gridTemplateColumns:"2fr 2fr 3fr auto", gap:6, alignItems:"end" }}>
+        <div>{idx===0&&<label style={lbl}>Weight (kg)</label>}<input type="number" placeholder="100" value={s.weight} onChange={e=>onChange("weight",e.target.value)} style={inp}/></div>
+        <div>{idx===0&&<label style={lbl}>Reps</label>}<input type="number" placeholder="8" value={s.reps} onChange={e=>onChange("reps",e.target.value)} style={inp}/></div>
+        <div>{idx===0&&<label style={lbl}>Intensity</label>}<select value={s.intensity} onChange={e=>onChange("intensity",e.target.value)} style={{...inp,color:GYM_COLORS[s.intensity]}}>{GYM_INTENSITIES.map(i=><option key={i} style={{color:GYM_COLORS[i]}}>{i}</option>)}</select></div>
+        <div style={{ display:"flex", alignItems:"flex-end", paddingBottom:1 }}>{canRemove?<button onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:"#ef4444", fontSize:16, padding:"7px 6px" }}>✕</button>:<div style={{width:30}}/>}</div>
+      </div>
+      {est&&<div style={{ fontSize:11, color:"#64748b", marginTop:3, paddingLeft:2 }}>Est. 1RM: <span style={{color:"#fb923c"}}>{est}kg</span></div>}
+    </div>
+  );
+}
+
+function ExerciseBlock({ ex, idx, onUpdate, onRemove, canRemove, exerciseList, allTimeBests }) {
+  const updateSet = (si,f,v) => { const sets=[...ex.sets]; sets[si]={...sets[si],[f]:v}; onUpdate({...ex,sets}); };
+  const bestSet = ex.name && allTimeBests && allTimeBests[ex.name] ? allTimeBests[ex.name].lastSessionBestSet : null;
+  return (
+    <div style={{ background:"#0f1320", border:"1px solid #2a3045", borderRadius:12, padding:12, marginBottom:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+        <span style={{ color:"#a78bfa", fontSize:13, fontWeight:700 }}>EXERCISE {idx+1}</span>
+        {canRemove&&<button onClick={onRemove} style={{ background:"none", border:"none", cursor:"pointer", color:"#ef4444", fontSize:15, padding:0 }}>✕</button>}
+      </div>
+      <div style={{ marginBottom:8 }}><label style={lbl}>Exercise</label>
+        <select value={ex.name} onChange={e=>onUpdate({...ex,name:e.target.value})} style={{...inp,color:ex.name?"#e2e8f0":"#64748b"}}>
+          <option value="" disabled>Select an exercise...</option>
+          {exerciseList.map(n=><option key={n} value={n}>{n}</option>)}
+        </select>
+      </div>
+      {ex.name && (bestSet ? (
+        <div style={{ display:"flex", alignItems:"center", gap:10, background:"#13182a", border:"1px solid #1e2a40", borderRadius:8, padding:"7px 12px", marginBottom:10, flexWrap:"wrap" }}>
+          <span style={{ fontSize:11, color:"#64748b", textTransform:"uppercase", letterSpacing:0.5, whiteSpace:"nowrap" }}>Last best set</span>
+          <span style={{ fontSize:13, color:"#e2e8f0", fontWeight:600 }}>{bestSet.weight}kg × {bestSet.reps}</span>
+          <span style={{ fontSize:11, color:GYM_COLORS[bestSet.intensity], background:"#0f1320", borderRadius:999, padding:"1px 8px" }}>{bestSet.intensity}</span>
+          <span style={{ fontSize:11, color:"#64748b", marginLeft:"auto" }}>{(+bestSet.weight)*(+bestSet.reps)}kg vol</span>
+        </div>
+      ) : <div style={{ fontSize:11, color:"#64748b", marginBottom:10, paddingLeft:2 }}>No history yet for this exercise.</div>)}
+      <div style={{ color:"#64748b", fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, marginBottom:6 }}>Sets</div>
+      {ex.sets.map((s,si)=><GymSetRow key={s.id} s={s} idx={si} onChange={(f,v)=>updateSet(si,f,v)} onRemove={()=>onUpdate({...ex,sets:ex.sets.filter((_,j)=>j!==si)})} canRemove={ex.sets.length>1}/>)}
+      <button onClick={()=>onUpdate({...ex,sets:[...ex.sets,emptyGymSet()]})} style={{ width:"100%", padding:7, borderRadius:7, border:"1px dashed #3b2f6e", background:"transparent", color:"#a78bfa", cursor:"pointer", fontSize:12, marginTop:6 }}>+ Add Set</button>
+    </div>
+  );
+}
+
+function WorkoutForm({ initial, wtype, setWtype, onSave, onCancel, exerciseList, setExerciseList, isEdit, allTimeBests }) {
+  const [form, setForm] = useState(initial);
+  const [newExName, setNewExName] = useState("");
+  const setF = (k,v) => setForm(f=>({...f,[k]:v}));
+  const updateSwimSet = (idx,u) => { const s=[...form.swimSets]; s[idx]=u; setF("swimSets",s); };
+  const updateExercise = (idx,u) => { const e=[...form.exercises]; e[idx]=u; setF("exercises",e); };
+  const swimLiveTotals = useMemo(() => {
+    const t={Easy:0,Moderate:0,"Maximum Effort":0};
+    form.swimSets.forEach(s=>s.segments.forEach(seg=>{t[seg.intensity]=(t[seg.intensity]||0)+(+seg.distance||0)*(s.reps||1);}));
+    return t;
+  }, [form.swimSets]);
+  const swimLiveTotal = Object.values(swimLiveTotals).reduce((a,b)=>a+b,0);
+  return (
+    <div style={{ maxWidth:540 }}>
+      <Card>
+        <div style={{ fontWeight:700, fontSize:16, marginBottom:16 }}>{isEdit?"Edit Workout":"Log a Workout"}</div>
+        {!isEdit&&<div style={{ display:"flex", gap:8, marginBottom:16 }}>{["swim","gym"].map(t=><button key={t} onClick={()=>setWtype(t)} style={{ flex:1, padding:10, borderRadius:8, cursor:"pointer", fontWeight:600, background:wtype===t?(t==="swim"?"#0e4f6e":"#2d1b4e"):"#0f1320", color:wtype===t?(t==="swim"?"#38bdf8":"#a78bfa"):"#8892a4", border:`1px solid ${wtype===t?(t==="swim"?"#38bdf8":"#a78bfa"):"#2a3045"}` }}>{t==="swim"?"🏊 Swimming":"🏋️ Gym"}</button>)}</div>}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+          <div><label style={lbl}>Date</label><input type="date" value={form.date||""} onChange={e=>setF("date",e.target.value)} style={inp}/></div>
+          <div><label style={lbl}>Duration (min)</label><input type="number" placeholder="45" value={form.duration||""} onChange={e=>setF("duration",e.target.value)} style={inp}/></div>
+        </div>
+        {wtype==="gym"&&<div style={{ background:"#0f1320", borderRadius:10, padding:"10px 12px", marginBottom:12, display:"flex", gap:8, alignItems:"flex-end" }}>
+          <div style={{flex:1}}><label style={lbl}>Add New Exercise to List</label><input placeholder="e.g. Overhead Press" value={newExName} onChange={e=>setNewExName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newExName.trim()&&!exerciseList.includes(newExName.trim())){setExerciseList(l=>[...l,newExName.trim()]);setNewExName("");}}} style={inp}/></div>
+          <button onClick={()=>{const n=newExName.trim();if(n&&!exerciseList.includes(n)){setExerciseList(l=>[...l,n]);setNewExName("");}}} style={{ padding:"7px 14px", borderRadius:8, border:"none", cursor:"pointer", background:"#a78bfa", color:"#0d1117", fontWeight:700, fontSize:13, whiteSpace:"nowrap" }}>+ Add</button>
+        </div>}
+        {wtype==="swim"?(<>
+          {swimLiveTotal>0&&<div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", background:"#0f1320", borderRadius:10, padding:"8px 12px", marginBottom:12 }}>
+            <span style={{ color:"#34d399", fontSize:13, fontWeight:600 }}>{swimLiveTotal}m total</span>
+            {SWIM_INTENSITIES.filter(i=>swimLiveTotals[i]>0).map(i=><span key={i} style={{ fontSize:12, color:SWIM_COLORS[i], background:"#13182a", borderRadius:999, padding:"2px 9px" }}>{i}: {swimLiveTotals[i]}m</span>)}
+          </div>}
+          {form.swimSets.map((s,i)=><SwimSetBlock key={s.id} s={s} idx={i} onUpdate={u=>updateSwimSet(i,u)} onRemove={()=>setF("swimSets",form.swimSets.filter((_,j)=>j!==i))} canRemove={form.swimSets.length>1}/>)}
+          <button onClick={()=>setF("swimSets",[...form.swimSets,emptySwimSet()])} style={{ width:"100%", padding:9, borderRadius:8, border:"1px dashed #38bdf8", background:"transparent", color:"#38bdf8", cursor:"pointer", fontWeight:600, fontSize:13, marginBottom:12 }}>+ Add Set</button>
+        </>):(<>
+          {form.exercises.map((ex,i)=><ExerciseBlock key={ex.id} ex={ex} idx={i} onUpdate={u=>updateExercise(i,u)} onRemove={()=>setF("exercises",form.exercises.filter((_,j)=>j!==i))} canRemove={form.exercises.length>1} exerciseList={exerciseList} allTimeBests={allTimeBests}/>)}
+          <button onClick={()=>setF("exercises",[...form.exercises,emptyExercise()])} style={{ width:"100%", padding:9, borderRadius:8, border:"1px dashed #a78bfa", background:"transparent", color:"#a78bfa", cursor:"pointer", fontWeight:600, fontSize:13, marginBottom:12 }}>+ Add Exercise</button>
+        </>)}
+        <div style={{ marginBottom:14 }}><label style={lbl}>Notes</label><input placeholder="Optional notes..." value={form.notes||""} onChange={e=>setF("notes",e.target.value)} style={inp}/></div>
+        <div style={{ display:"flex", gap:8 }}>
+          {isEdit&&<button onClick={onCancel} style={{ flex:1, padding:12, borderRadius:8, border:"1px solid #2a3045", cursor:"pointer", fontWeight:700, fontSize:15, background:"transparent", color:"#8892a4" }}>Cancel</button>}
+          <button onClick={()=>onSave(form)} style={{ flex:1, padding:12, borderRadius:8, border:"none", cursor:"pointer", fontWeight:700, fontSize:15, background:"linear-gradient(135deg, #0ea5e9, #6366f1)", color:"#fff" }}>{isEdit?"Save Changes":"+ Add Workout"}</button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PRsTab({ workouts, realPRs, setRealPRs }) {
+  const [editing, setEditing] = useState({});
+  const gyms = workouts.filter(w=>w.type==="gym");
+  const exerciseStats = useMemo(()=>buildAllTimeBests(gyms),[gyms]);
+  const names = Object.keys(exerciseStats);
+  const saveReal = (name) => {
+    const e=editing[name]; if(!e?.weight) return;
+    setRealPRs(p=>({...p,[name]:{weight:+e.weight,date:e.date||""}}));
+    setEditing(ed=>{const n={...ed};delete n[name];return n;});
+  };
+  if(!names.length) return <div style={{ color:"#8892a4", textAlign:"center", marginTop:40 }}>No gym workouts logged yet.</div>;
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+      <div style={{ color:"#8892a4", fontSize:13, marginBottom:4 }}>Tracking PRs across <strong style={{color:"#e2e8f0"}}>{names.length}</strong> exercise{names.length!==1?"s":""}.</div>
+      {names.map(name=>{
+        const s=exerciseStats[name], real=realPRs[name], isEditing=!!editing[name];
+        return (
+          <Card key={name}>
+            <div style={{ fontWeight:700, fontSize:15, color:"#a78bfa", marginBottom:12 }}>{name}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:10, marginBottom:12 }}>
+              <div style={{ background:"#0f1320", borderRadius:10, padding:10 }}>
+                <div style={{ color:"#64748b", fontSize:11, textTransform:"uppercase", letterSpacing:0.5, marginBottom:4 }}>Est. 1RM</div>
+                <div style={{ color:"#fb923c", fontSize:22, fontWeight:700 }}>{s.estRM?`${s.estRM}kg`:"—"}</div>
+                {s.bestEstSet&&<div style={{ color:"#64748b", fontSize:11, marginTop:3 }}>{s.bestEstSet.weight}kg × {s.bestEstSet.reps}</div>}
+              </div>
+              <div style={{ background:"#0f1320", borderRadius:10, padding:10 }}>
+                <div style={{ color:"#64748b", fontSize:11, textTransform:"uppercase", letterSpacing:0.5, marginBottom:4 }}>Real 1RM</div>
+                {real?<><div style={{ color:"#f43f5e", fontSize:22, fontWeight:700 }}>{real.weight}kg</div>{real.date&&<div style={{ color:"#64748b", fontSize:11, marginTop:3 }}>{fmt(real.date)}</div>}</>:<div style={{ color:"#2a3045", fontSize:16, fontWeight:600 }}>Not set</div>}
+              </div>
+              <div style={{ background:"#0f1320", borderRadius:10, padding:10 }}>
+                <div style={{ color:"#64748b", fontSize:11, textTransform:"uppercase", letterSpacing:0.5, marginBottom:4 }}>Best Set Vol</div>
+                <div style={{ color:"#34d399", fontSize:22, fontWeight:700 }}>{s.bestVol?`${s.bestVol}kg`:"—"}</div>
+                {s.bestVolSet&&<div style={{ color:"#64748b", fontSize:11, marginTop:3 }}>{s.bestVolSet.weight}kg × {s.bestVolSet.reps}</div>}
+              </div>
+            </div>
+            {isEditing?(
+              <div style={{ background:"#0f1320", borderRadius:10, padding:10 }}>
+                <div style={{ color:"#8892a4", fontSize:12, marginBottom:8 }}>Log Real 1RM for <strong style={{color:"#e2e8f0"}}>{name}</strong></div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr auto", gap:8, alignItems:"end" }}>
+                  <div><label style={lbl}>Weight (kg)</label><input type="number" placeholder="120" value={editing[name]?.weight||""} onChange={e=>setEditing(ed=>({...ed,[name]:{...ed[name],weight:e.target.value}}))} style={inp}/></div>
+                  <div><label style={lbl}>Date</label><input type="date" value={editing[name]?.date||""} onChange={e=>setEditing(ed=>({...ed,[name]:{...ed[name],date:e.target.value}}))} style={inp}/></div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={()=>saveReal(name)} style={{ padding:"7px 14px", borderRadius:8, border:"none", cursor:"pointer", background:"#f43f5e", color:"#fff", fontWeight:700, fontSize:13 }}>Save</button>
+                    <button onClick={()=>setEditing(ed=>{const n={...ed};delete n[name];return n;})} style={{ padding:"7px 10px", borderRadius:8, border:"1px solid #2a3045", cursor:"pointer", background:"transparent", color:"#8892a4", fontSize:13 }}>✕</button>
+                  </div>
+                </div>
+              </div>
+            ):<button onClick={()=>setEditing(ed=>({...ed,[name]:{weight:real?.weight||"",date:real?.date||""}}))} style={{ padding:"7px 14px", borderRadius:8, border:"1px solid #2a3045", cursor:"pointer", background:"transparent", color:"#8892a4", fontSize:13, fontWeight:600 }}>{real?"✏️ Update Real 1RM":"＋ Log Real 1RM"}</button>}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState("Dashboard");
+  const [workouts, setWorkouts] = useState(() => LS.get("aqualift_workouts") || []);
+  const [realPRs, setRealPRs] = useState(() => LS.get("aqualift_realPRs") || {});
+  const [exerciseList, setExerciseList] = useState(() => LS.get("aqualift_exerciseList") || INITIAL_EXERCISES);
+  const [wtype, setWtype] = useState("swim");
+  const [filter, setFilter] = useState("all");
+  const [swimRange, setSwimRange] = useState(7);
+  const [gymRange, setGymRange] = useState(7);
+  const [editingWorkout, setEditingWorkout] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const saveWorkouts = w => { setWorkouts(w); LS.set("aqualift_workouts", w); };
+  const saveRealPRs = r => { setRealPRs(r); LS.set("aqualift_realPRs", r); };
+  const saveExerciseList = e => { setExerciseList(e); LS.set("aqualift_exerciseList", e); };
+
+  const filterByDays = (list,days) => list.filter(w=>(new Date()-new Date(w.date))/86400000<=days);
+  const swims = workouts.filter(w=>w.type==="swim");
+  const gyms = workouts.filter(w=>w.type==="gym");
+  const allTimeBests = useMemo(()=>buildAllTimeBests(gyms),[gyms]);
+
+  const swimChartData = useMemo(()=>filterByDays(swims,swimRange).slice().sort((a,b)=>a.date.localeCompare(b.date)).map(s=>{
+    const t={Easy:0,Moderate:0,"Maximum Effort":0};
+    s.sets.forEach(set=>set.segments.forEach(seg=>{t[seg.intensity]=(t[seg.intensity]||0)+(+seg.distance||0)*set.reps;}));
+    return{date:fmt(s.date).slice(0,6),...t};
+  }),[swims,swimRange]);
+
+  const gymChartData = useMemo(()=>filterByDays(gyms,gymRange).slice().sort((a,b)=>a.date.localeCompare(b.date)).map(g=>({date:fmt(g.date).slice(0,6),volume:gymVol(g)})),[gyms,gymRange]);
+
+  const totalSwimDist = swims.reduce((a,s)=>a+s.sets.reduce((b,set)=>b+swimSetDist(set),0),0);
+  const totalGymVol = gyms.reduce((a,g)=>a+gymVol(g),0);
+  const bestSwim = swims.length?Math.max(...swims.map(s=>s.sets.reduce((b,set)=>b+swimSetDist(set),0))):0;
+  const recentCount = workouts.filter(w=>(new Date()-new Date(w.date))/86400000<=7).length;
+  const filtered = filter==="all"?workouts:workouts.filter(w=>w.type===filter);
+
+  const saveWorkout = form => {
+    const base={id:Date.now(),type:wtype,date:form.date,duration:+form.duration,notes:form.notes||""};
+    const entry=wtype==="swim"?{...base,sets:form.swimSets}:{...base,exercises:form.exercises};
+    saveWorkouts([entry,...workouts].sort((a,b)=>b.date.localeCompare(a.date)));
+    setTab("History");
+  };
+  const saveEdit = form => {
+    saveWorkouts(workouts.map(w=>w.id!==editingWorkout.id?w:{...w,date:form.date,duration:+form.duration,notes:form.notes||"",...(w.type==="swim"?{sets:form.swimSets}:{exercises:form.exercises})}));
+    setEditingWorkout(null); setTab("History");
+  };
+  const confirmAndDelete = () => { saveWorkouts(workouts.filter(x=>x.id!==confirmDelete)); setConfirmDelete(null); };
+  const getFormForWorkout = w => w.type==="swim"
+    ?{date:w.date,duration:w.duration,notes:w.notes,swimSets:w.sets,exercises:[emptyExercise()]}
+    :{date:w.date,duration:w.duration,notes:w.notes,swimSets:[emptySwimSet()],exercises:w.exercises};
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#0d1117", color:"#e2e8f0", fontFamily:"-apple-system, BlinkMacSystemFont, 'Inter', sans-serif", paddingBottom:40 }}>
+      {confirmDelete&&(
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.7)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+          <div style={{ background:"#1a1f2e", border:"1px solid #2a3045", borderRadius:16, padding:28, maxWidth:360, width:"100%", textAlign:"center" }}>
+            <div style={{ fontSize:32, marginBottom:12 }}>🗑️</div>
+            <div style={{ fontWeight:700, fontSize:17, marginBottom:8 }}>Delete this workout?</div>
+            <div style={{ color:"#8892a4", fontSize:14, marginBottom:24 }}>This action cannot be undone.</div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={()=>setConfirmDelete(null)} style={{ flex:1, padding:10, borderRadius:8, border:"1px solid #2a3045", background:"transparent", color:"#8892a4", fontWeight:600, cursor:"pointer", fontSize:14 }}>Cancel</button>
+              <button onClick={confirmAndDelete} style={{ flex:1, padding:10, borderRadius:8, border:"none", background:"#ef4444", color:"#fff", fontWeight:700, cursor:"pointer", fontSize:14 }}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{ background:"#0f1320", borderBottom:"1px solid #1e2736", padding:"16px 24px", display:"flex", alignItems:"center", gap:12 }}>
+        <svg viewBox="0 0 48 48" width="36" height="36" fill="none">
+          <defs><filter id="glow"><feGaussianBlur stdDeviation="1.5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+          <circle cx="24" cy="24" r="24" fill="#0d1117"/>
+          <path d="M6 31 Q10 26 14 31 Q18 36 22 31 Q26 26 30 31 Q34 36 38 31 Q41 27 42 29" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" fill="none" filter="url(#glow)"/>
+          <rect x="14" y="17" width="20" height="4" rx="2" fill="#a78bfa" filter="url(#glow)"/>
+          <rect x="9" y="13" width="6" height="12" rx="3" fill="#a78bfa" filter="url(#glow)"/>
+          <rect x="33" y="13" width="6" height="12" rx="3" fill="#a78bfa" filter="url(#glow)"/>
+        </svg>
+        <div>
+          <div style={{ fontWeight:700, fontSize:18, color:"#38bdf8" }}>AquaLift</div>
+          <div style={{ fontSize:12, color:"#8892a4" }}>Swimming & Gym Dashboard</div>
+        </div>
+      </div>
+      <div style={{ display:"flex", gap:4, padding:"16px 24px 0", borderBottom:"1px solid #1e2736", flexWrap:"wrap" }}>
+        {TABS.map(t=><button key={t} onClick={()=>{setEditingWorkout(null);setTab(t);}} style={{ padding:"8px 18px", borderRadius:"8px 8px 0 0", border:"none", cursor:"pointer", fontWeight:600, fontSize:14, background:tab===t?"#1a1f2e":"transparent", color:tab===t?"#38bdf8":"#8892a4", borderBottom:tab===t?"2px solid #38bdf8":"2px solid transparent" }}>{t}</button>)}
+      </div>
+      <div style={{ padding:24 }}>
+        {tab==="Dashboard"&&(
+          <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:12 }}>
+              <StatCard label="Total Sessions" value={workouts.length} sub={`${swims.length} swim · ${gyms.length} gym`} color="#38bdf8"/>
+              <StatCard label="Swim Distance" value={`${(totalSwimDist/1000).toFixed(1)}km`} sub={`Best: ${bestSwim}m`} color="#34d399"/>
+              <StatCard label="Gym Volume" value={`${(totalGymVol/1000).toFixed(1)}t`} sub="excl. warmups" color="#a78bfa"/>
+              <StatCard label="This Week" value={recentCount} sub="workouts in 7 days" color="#fb923c"/>
+            </div>
+            <Card>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                <div style={{ fontWeight:600, color:"#38bdf8" }}>🏊 Swim Distance by Intensity (m)</div>
+                <div style={{ display:"flex", gap:4 }}>{[7,14,30].map(d=><button key={d} onClick={()=>setSwimRange(d)} style={{ padding:"3px 10px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:swimRange===d?"#38bdf8":"#0f1320", color:swimRange===d?"#0d1117":"#8892a4" }}>{d}d</button>)}</div>
+              </div>
+              <div style={{ display:"flex", gap:12, marginBottom:12 }}>{SWIM_INTENSITIES.map(i=><div key={i} style={{ display:"flex", alignItems:"center", gap:5 }}><div style={{ width:10, height:10, borderRadius:2, background:SWIM_COLORS[i] }}/><span style={{ color:"#8892a4", fontSize:11 }}>{i}</span></div>)}</div>
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={swimChartData} barCategoryGap="25%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e2736" vertical={false}/>
+                  <XAxis dataKey="date" tick={{fill:"#8892a4",fontSize:11}}/>
+                  <YAxis tick={{fill:"#8892a4",fontSize:11}}/>
+                  <Tooltip contentStyle={{background:"#1a1f2e",border:"1px solid #2a3045",borderRadius:8}} labelStyle={{color:"#38bdf8"}} formatter={(v,n)=>[`${v}m`,n]} cursor={{fill:"rgba(255,255,255,0.04)"}}/>
+                  {SWIM_INTENSITIES.map(intensity=>(
+                    <Bar key={intensity} dataKey={intensity} stackId="a" fill={SWIM_COLORS[intensity]}
+                      shape={(props)=>{
+                        const{x,y,width,height,index}=props; if(!height) return null;
+                        const d=swimChartData[index],order=SWIM_INTENSITIES.filter(i=>d[i]>0);
+                        const isBottom=order[0]===intensity,isTop=order[order.length-1]===intensity,r=4;
+                        const tl=isTop?r:0,tr=isTop?r:0,bl=isBottom?r:0,br=isBottom?r:0;
+                        return <path d={`M${x+bl},${y+height} Q${x},${y+height} ${x},${y+height-bl} L${x},${y+tl} Q${x},${y} ${x+tl},${y} L${x+width-tr},${y} Q${x+width},${y} ${x+width},${y+tr} L${x+width},${y+height-br} Q${x+width},${y+height} ${x+width-br},${y+height} Z`} fill={SWIM_COLORS[intensity]}/>;
+                      }}/>
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+                <div style={{ fontWeight:600, color:"#a78bfa" }}>🏋️ Gym Volume Per Session (excl. warmups)</div>
+                <div style={{ display:"flex", gap:4 }}>{[7,14,30].map(d=><button key={d} onClick={()=>setGymRange(d)} style={{ padding:"3px 10px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600, background:gymRange===d?"#a78bfa":"#0f1320", color:gymRange===d?"#0d1117":"#8892a4" }}>{d}d</button>)}</div>
+              </div>
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={gymChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e2736" vertical={false}/>
+                  <XAxis dataKey="date" tick={{fill:"#8892a4",fontSize:11}}/>
+                  <YAxis tick={{fill:"#8892a4",fontSize:11}}/>
+                  <Tooltip contentStyle={{background:"#1a1f2e",border:"1px solid #2a3045",borderRadius:8}} labelStyle={{color:"#a78bfa"}} cursor={{fill:"rgba(255,255,255,0.04)"}}/>
+                  <Bar dataKey="volume" fill="#a78bfa" radius={[4,4,4,4]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+          </div>
+        )}
+        {tab==="Log Workout"&&<WorkoutForm initial={{date:"",duration:"",notes:"",swimSets:[emptySwimSet()],exercises:[emptyExercise()]}} wtype={wtype} setWtype={setWtype} onSave={saveWorkout} onCancel={()=>{}} isEdit={false} exerciseList={exerciseList} setExerciseList={saveExerciseList} allTimeBests={allTimeBests}/>}
+        {tab==="History"&&!editingWorkout&&(
+          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+            <div style={{ display:"flex", gap:8 }}>{["all","swim","gym"].map(f=><button key={f} onClick={()=>setFilter(f)} style={{ padding:"6px 16px", borderRadius:999, border:"none", cursor:"pointer", fontWeight:600, fontSize:13, background:filter===f?"#38bdf8":"#1a1f2e", color:filter===f?"#0d1117":"#8892a4" }}>{f==="all"?"All":f==="swim"?"🏊 Swim":"🏋️ Gym"}</button>)}</div>
+            {filtered.length===0&&<div style={{ color:"#8892a4", textAlign:"center", marginTop:40 }}>No workouts yet.</div>}
+            {filtered.map(w=>(
+              <Card key={w.id}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:8, flexWrap:"wrap" }}>
+                      <Badge type={w.type}/>
+                      <span style={{ color:"#8892a4", fontSize:13 }}>{fmt(w.date)}</span>
+                      <span style={{ color:"#8892a4", fontSize:13 }}>· {w.duration} min</span>
+                      {w.type==="swim"&&(()=>{
+                        const t={Easy:0,Moderate:0,"Maximum Effort":0};
+                        w.sets.forEach(s=>s.segments.forEach(seg=>{t[seg.intensity]=(t[seg.intensity]||0)+(+seg.distance||0)*s.reps;}));
+                        return <>{<span style={{color:"#34d399",fontSize:13}}>· {w.sets.reduce((a,s)=>a+swimSetDist(s),0)}m total</span>}{SWIM_INTENSITIES.filter(i=>t[i]>0).map(i=><span key={i} style={{fontSize:12,color:SWIM_COLORS[i],background:"#0f1320",borderRadius:999,padding:"1px 8px"}}>{i}: {t[i]}m</span>)}</>;
+                      })()}
+                    </div>
+                    {w.type==="swim"?(
+                      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                        {w.sets.map((s,si)=>(
+                          <div key={s.id} style={{ background:"#0f1320", borderRadius:8, padding:"8px 10px" }}>
+                            <div style={{ color:"#38bdf8", fontSize:11, fontWeight:700, marginBottom:5, textTransform:"uppercase", letterSpacing:0.5 }}>Set {si+1} · {s.reps}×</div>
+                            {s.segments.map(seg=>(
+                              <div key={seg.id} style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", marginBottom:3 }}>
+                                {s.segments.length>1&&<span style={{color:"#2a3a55",fontSize:11}}>▸</span>}
+                                <span style={{fontSize:13,color:"#cbd5e1"}}>{seg.distance}m {seg.stroke}</span>
+                                <span style={{fontSize:11,color:SWIM_COLORS[seg.intensity],background:"#13182a",borderRadius:999,padding:"1px 7px"}}>{seg.intensity}</span>
+                                {seg.strokesPer25&&<span style={{fontSize:11,color:"#64748b"}}>{seg.strokesPer25} str/25m</span>}
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    ):(
+                      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                        {w.exercises.map((ex,ei)=>{
+                          const bests=allTimeBests[ex.name]||{};
+                          return (
+                            <div key={ex.id} style={{ background:"#0f1320", borderRadius:8, padding:"8px 10px" }}>
+                              <div style={{ color:"#a78bfa", fontSize:12, fontWeight:700, marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>{ex.name||`Exercise ${ei+1}`}</div>
+                              {ex.sets.map((s,si)=>{
+                                const vol=(+s.weight||0)*(+s.reps||0),est=epley(+s.weight||0,+s.reps||0);
+                                return (
+                                  <div key={s.id} style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", marginBottom:3 }}>
+                                    <span style={{color:"#64748b",fontSize:11,minWidth:40}}>Set {si+1}</span>
+                                    <span style={{fontSize:13,color:"#cbd5e1"}}>{s.weight}kg × {s.reps}</span>
+                                    <span style={{fontSize:11,color:GYM_COLORS[s.intensity],background:"#13182a",borderRadius:999,padding:"1px 7px"}}>{s.intensity}</span>
+                                    {bests.bestVol&&vol===bests.bestVol&&<span style={{fontSize:11,color:"#34d399",fontWeight:700}}>🏆 Vol PR</span>}
+                                    {bests.estRM&&est===bests.estRM&&<span style={{fontSize:11,color:"#fb923c",fontWeight:700}}>🏆 Est. 1RM PR</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {w.notes&&<div style={{fontSize:13,color:"#64748b",fontStyle:"italic",marginTop:6}}>{w.notes}</div>}
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:6, marginLeft:8 }}>
+                    <button onClick={()=>{setEditingWorkout(w);setTab("History");}} style={{background:"#1e2a40",border:"none",cursor:"pointer",color:"#38bdf8",fontSize:14,padding:"5px 8px",borderRadius:7}}>✏️</button>
+                    <button onClick={()=>setConfirmDelete(w.id)} style={{background:"#2a1a1a",border:"none",cursor:"pointer",color:"#ef4444",fontSize:14,padding:"5px 8px",borderRadius:7}}>🗑️</button>
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+        {tab==="History"&&editingWorkout&&<WorkoutForm initial={getFormForWorkout(editingWorkout)} wtype={editingWorkout.type} setWtype={()=>{}} onSave={saveEdit} onCancel={()=>setEditingWorkout(null)} isEdit={true} exerciseList={exerciseList} setExerciseList={saveExerciseList} allTimeBests={allTimeBests}/>}
+        {tab==="PRs"&&<PRsTab workouts={workouts} realPRs={realPRs} setRealPRs={saveRealPRs}/>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js"));
+}
+  </script>
+</body>
+</html>
