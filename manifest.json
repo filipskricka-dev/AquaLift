@@ -2,7 +2,7 @@
   "name": "AquaLift",
   "short_name": "AquaLift",
   "description": "Swimming & Gym Tracker",
-  "start_url": "/",
+  "start_url": "/AquaLift/",
   "display": "standalone",
   "background_color": "#0d1117",
   "theme_color": "#0d1117",
